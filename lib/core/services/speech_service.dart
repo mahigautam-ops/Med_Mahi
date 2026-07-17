@@ -74,12 +74,6 @@ class SpeechAIService extends ChangeNotifier {
       }
     }
 
-    if (!settings.isConfigured) {
-      _lastError = 'API not configured. Set API key in Admin Panel → AI Settings.';
-      notifyListeners();
-      return;
-    }
-
     _lastError = null;
     _lastChunkSent = DateTime.now();
     _fullTranscript.clear();

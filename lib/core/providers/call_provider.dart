@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../services/transcription_service.dart';
+import '../services/speech_service.dart';
 import '../services/ai_service.dart';
 import '../services/firebase_service.dart';
 import '../providers/ai_settings.dart';
@@ -20,9 +20,9 @@ class CallProvider extends ChangeNotifier {
       MethodChannel('com.medcaller.recording');
 
   StreamSubscription? _sub;
-  final TranscriptionService _transcriptionService = TranscriptionService();
   final FirebaseService _firebaseService = FirebaseService();
   AiSettingsProvider? _aiSettings;
+  SpeechAIService? _speechAI;
 
   CallState _state = CallState.idle;
   String _number = '';
@@ -51,6 +51,9 @@ class CallProvider extends ChangeNotifier {
       _state == CallState.dialing ||
       _state == CallState.active ||
       _state == CallState.holding;
+
+  String get liveTranscript => _speechAI?.fullTranscript ?? '';
+  String get livePartialWords => _speechAI?.currentWords ?? '';
 
   Future<void> initialize() async {
     await checkDefaultDialer();
@@ -171,6 +174,7 @@ class CallProvider extends ChangeNotifier {
   Future<void> toggleRecording() async {
     if (_isRecording) {
       _recordingPath = await _recordingChannel.invokeMethod<String>('stopRecording');
+      _speechAI?.stopListeningAndGenerate();
       _isRecording = false;
       debugPrint('[CallProvider] Recording stopped: $_recordingPath');
     } else {
@@ -184,6 +188,11 @@ class CallProvider extends ChangeNotifier {
         _isRecording = true;
         _recordingPath = path;
         debugPrint('[CallProvider] Recording started: $path');
+
+        // Start speech recognition in parallel
+        if (_speechAI != null) {
+          await _speechAI!.startListening();
+        }
       }
     }
     notifyListeners();
@@ -203,36 +212,44 @@ class CallProvider extends ChangeNotifier {
 
   void setAiSettings(AiSettingsProvider settings) {
     _aiSettings = settings;
+    _speechAI = SpeechAIService(settings);
   }
 
   void _onCallEnded() async {
-    final path = await stopRecordingIfActive();
-    if (path == null || path.isEmpty) return;
-    if (_aiSettings == null) {
-      debugPrint('[CallProvider] No AI settings configured — skipping recording pipeline');
+    await stopRecordingIfActive();
+
+    // Stop speech recognition and get transcript
+    String transcript = '';
+    if (_speechAI != null && _speechAI!.isListening) {
+      final result = await _speechAI!.stopListeningAndGenerate();
+      transcript = _speechAI!.fullTranscript;
+      debugPrint('[CallProvider] Speech transcript: ${transcript.substring(0, transcript.length > 100 ? 100 : transcript.length)}...');
+    }
+
+    if (transcript.isEmpty) {
+      debugPrint('[CallProvider] No transcript captured — skipping pipeline');
+      _callDuration = Duration.zero;
+      notifyListeners();
       return;
+    }
+
+    if (_aiSettings == null || !_aiSettings!.isConfigured) {
+      debugPrint('[CallProvider] AI not configured — skipping summary (transcript saved to timeline)');
     }
 
     _isProcessingRecording = true;
     notifyListeners();
 
     try {
-      debugPrint('[CallProvider] Processing recording: $path');
-      await _transcriptionService.load();
-
-      String transcript;
-      try {
-        transcript = await _transcriptionService.transcribe(path);
-      } catch (e) {
-        debugPrint('[CallProvider] Transcription failed: $e');
-        _isProcessingRecording = false;
-        notifyListeners();
-        return;
+      // Generate AI summary from transcript
+      AISummaryResult? result;
+      if (_aiSettings != null && _aiSettings!.isConfigured) {
+        try {
+          result = await AIService(_aiSettings!).generateMedicalSummary(transcript);
+        } catch (e) {
+          debugPrint('[CallProvider] AI summary failed: $e');
+        }
       }
-
-      final result = _aiSettings!.isConfigured
-          ? await AIService(_aiSettings!).generateMedicalSummary(transcript)
-          : null;
 
       final patientPhone = _number;
       if (patientPhone.isNotEmpty) {
@@ -266,6 +283,7 @@ class CallProvider extends ChangeNotifier {
     } finally {
       _isProcessingRecording = false;
       _callDuration = Duration.zero;
+      _speechAI?.clearTranscript();
       notifyListeners();
     }
   }
