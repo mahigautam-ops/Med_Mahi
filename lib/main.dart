@@ -31,8 +31,10 @@ void main() async {
         ChangeNotifierProvider(create: (_) => ThemeProvider()),
         ChangeNotifierProvider(create: (_) => AiSettingsProvider()..load()),
         ChangeNotifierProvider(
-          create: (_) {
+          create: (ctx) {
+            final aiSettings = ctx.read<AiSettingsProvider>();
             final cp = CallProvider();
+            cp.setAiSettings(aiSettings);
             cp.initialize().then((_) => cp.startBackgroundService());
             return cp;
           },

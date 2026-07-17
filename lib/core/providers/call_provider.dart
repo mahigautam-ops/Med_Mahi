@@ -32,6 +32,8 @@ class CallProvider extends ChangeNotifier {
   bool _isDefaultDialer = false;
   bool _isRecording = false;
   String? _recordingPath;
+  bool _isProcessingRecording = false;
+  Duration _callDuration = Duration.zero;
 
   CallState get state => _state;
   String get number => _number;
@@ -42,6 +44,7 @@ class CallProvider extends ChangeNotifier {
   bool get isDefaultDialer => _isDefaultDialer;
   bool get isRecording => _isRecording;
   String? get recordingPath => _recordingPath;
+  bool get isProcessingRecording => _isProcessingRecording;
   bool get isInCall =>
       _state == CallState.ringing ||
       _state == CallState.dialing ||
@@ -199,14 +202,30 @@ class CallProvider extends ChangeNotifier {
   void _onCallEnded() async {
     final path = await stopRecordingIfActive();
     if (path == null || path.isEmpty) return;
-    if (_aiSettings == null) return;
+    if (_aiSettings == null) {
+      debugPrint('[CallProvider] No AI settings configured — skipping recording pipeline');
+      return;
+    }
+
+    _isProcessingRecording = true;
+    notifyListeners();
 
     try {
       debugPrint('[CallProvider] Processing recording: $path');
       await _transcriptionService.load();
-      final transcript = await _transcriptionService.transcribe(path);
-      final result = await _aiSettings!.isConfigured
-          ? AIService(_aiSettings!).generateMedicalSummary(transcript)
+
+      String transcript;
+      try {
+        transcript = await _transcriptionService.transcribe(path);
+      } catch (e) {
+        debugPrint('[CallProvider] Transcription failed: $e');
+        _isProcessingRecording = false;
+        notifyListeners();
+        return;
+      }
+
+      final result = _aiSettings!.isConfigured
+          ? await AIService(_aiSettings!).generateMedicalSummary(transcript)
           : null;
 
       final patientPhone = _number;
@@ -238,10 +257,17 @@ class CallProvider extends ChangeNotifier {
       }
     } catch (e) {
       debugPrint('[CallProvider] Recording pipeline error: $e');
+    } finally {
+      _isProcessingRecording = false;
+      _callDuration = Duration.zero;
+      notifyListeners();
     }
   }
 
-  Duration _callDuration = Duration.zero;
+  void updateCallDuration(Duration duration) {
+    _callDuration = duration;
+  }
+
   String get _callDurationStr {
     final m = _callDuration.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = _callDuration.inSeconds.remainder(60).toString().padLeft(2, '0');

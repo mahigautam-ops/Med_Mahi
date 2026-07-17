@@ -73,7 +73,10 @@ class _InCallScreenState extends State<InCallScreen> with SingleTickerProviderSt
   void _startTimer() {
     _durationTimer?.cancel();
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _callDuration += const Duration(seconds: 1));
+      if (mounted) {
+        setState(() => _callDuration += const Duration(seconds: 1));
+        context.read<CallProvider>().updateCallDuration(_callDuration);
+      }
     });
   }
 
