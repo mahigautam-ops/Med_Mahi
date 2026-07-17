@@ -1,35 +1,58 @@
 import 'dart:io';
 import 'dart:convert';
-import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
+import 'package:vosk_flutter_service/vosk_flutter_service.dart';
 import '../providers/ai_settings.dart';
 import 'ai_service.dart';
 
 class TranscriptionService {
-  String _apiKey = '';
-  static const _kGoogleSttKey = 'google_stt_api_key';
-  static const _endpoint = 'https://speech.googleapis.com/v1/speech:recognize';
+  static const _modelName = 'vosk-model-small-en-us-0.15';
+  static const _sampleRate = 16000;
 
-  bool get isConfigured => _apiKey.isNotEmpty;
+  VoskFlutterPlugin? _vosk;
+  Model? _model;
+  bool _initialized = false;
+  bool _initializing = false;
 
-  Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    _apiKey = prefs.getString(_kGoogleSttKey) ?? '';
+  bool get isConfigured => true;
+
+  Future<void> _ensureInitialized() async {
+    if (_initialized) return;
+    if (_initializing) return;
+    _initializing = true;
+
+    try {
+      _vosk = VoskFlutterPlugin.instance();
+      final modelLoader = ModelLoader();
+
+      debugPrint('[TranscriptionService] Downloading/loading Vosk model...');
+      final modelsList = await modelLoader.loadModelsList();
+      final modelDesc = modelsList.firstWhere(
+        (m) => m.name == _modelName,
+        orElse: () => throw AIException(
+          'Model not found',
+          'Vosk model $_modelName not available',
+        ),
+      );
+      final modelPath = await modelLoader.loadFromNetwork(modelDesc.url);
+      _model = await _vosk!.createModel(modelPath);
+
+      _initialized = true;
+      debugPrint('[TranscriptionService] Vosk initialized');
+    } catch (e) {
+      _initializing = false;
+      if (e is AIException) rethrow;
+      throw AIException('Vosk init failed', e.toString());
+    }
   }
 
-  Future<void> updateApiKey(String key) async {
-    _apiKey = key.trim();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kGoogleSttKey, _apiKey);
-  }
+  Future<void> load() async {}
+
+  Future<void> updateApiKey(String key) async {}
 
   Future<String> transcribe(String wavFilePath) async {
-    if (!isConfigured) {
-      throw AIException(
-        'Google STT not configured',
-        'Set Google Cloud API key in Admin Panel → AI Settings → Transcription.',
-      );
-    }
+    await _ensureInitialized();
 
     final file = File(wavFilePath);
     if (!await file.exists()) {
@@ -37,73 +60,63 @@ class TranscriptionService {
     }
 
     final bytes = await file.readAsBytes();
-    if (bytes.isEmpty) {
-      throw AIException('Empty file', 'Recording file is empty.');
+    if (bytes.length <= 44) {
+      throw AIException('Empty file', 'Recording file is too short.');
     }
 
-    final audioBase64 = base64Encode(bytes);
+    final pcmData = bytes.buffer.asUint8List(44);
+    debugPrint('[TranscriptionService] PCM data: ${pcmData.length} bytes');
 
-    final requestBody = jsonEncode({
-      'config': {
-        'encoding': 'LINEAR16',
-        'sampleRateHertz': 44100,
-        'languageCode': 'en-IN',
-        'alternativeLanguageCodes': ['en-US'],
-        'model': 'phone_call',
-        'enableAutomaticPunctuation': true,
-        'enableWordTimeOffsets': false,
-        'audioChannelCount': 1,
-        'useEnhanced': true,
-      },
-      'audio': {
-        'content': audioBase64,
-      },
-    });
+    final recognizer = await _vosk!.createRecognizer(
+      model: _model!,
+      sampleRate: _sampleRate,
+    );
 
     try {
-      final response = await http
-          .post(
-            Uri.parse('$_endpoint?key=$_apiKey'),
-            headers: {'Content-Type': 'application/json'},
-            body: requestBody,
-          )
-          .timeout(const Duration(seconds: 120));
+      final transcript = await _processAudio(recognizer, pcmData);
+      debugPrint('[TranscriptionService] Transcript: ${transcript.length} chars');
+      return transcript;
+    } finally {
+      await recognizer.close();
+    }
+  }
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final results = data['results'] as List? ?? [];
+  Future<String> _processAudio(Recognizer recognizer, Uint8List pcmData) async {
+    final results = <String>[];
+    const chunkSize = 8192;
+    var pos = 0;
 
-        final transcriptParts = <String>[];
-        for (final result in results) {
-          final alternatives = result['alternatives'] as List? ?? [];
-          if (alternatives.isNotEmpty) {
-            final transcript = alternatives[0]['transcript']?.toString() ?? '';
-            if (transcript.isNotEmpty) {
-              transcriptParts.add(transcript);
-            }
-          }
+    while (pos + chunkSize < pcmData.length) {
+      final chunk = Uint8List.fromList(
+        pcmData.getRange(pos, pos + chunkSize).toList(),
+      );
+      final resultReady = await recognizer.acceptWaveformBytes(chunk);
+      pos += chunkSize;
+
+      if (resultReady) {
+        final result = await recognizer.getResult();
+        final parsed = _parseResult(result);
+        if (parsed.isNotEmpty) {
+          results.add(parsed);
         }
-
-        return transcriptParts.join(' ').trim();
       }
+    }
 
-      if (response.statusCode == 403) {
-        throw AIException(
-          'API key invalid or STT not enabled',
-          'Enable Speech-to-Text API in Google Cloud Console.',
-        );
-      }
+    final finalResult = await recognizer.getFinalResult();
+    final parsed = _parseResult(finalResult);
+    if (parsed.isNotEmpty) {
+      results.add(parsed);
+    }
 
-      throw AIException(
-        'Transcription Error ${response.statusCode}',
-        response.body,
-      );
-    } catch (e) {
-      if (e is AIException) rethrow;
-      throw AIException(
-        'Transcription failed',
-        'Check internet connection and try again.',
-      );
+    return results.join(' ').trim();
+  }
+
+  String _parseResult(String jsonStr) {
+    try {
+      final data = jsonDecode(jsonStr);
+      return data['text']?.toString() ?? '';
+    } catch (_) {
+      return jsonStr;
     }
   }
 

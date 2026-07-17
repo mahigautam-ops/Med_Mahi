@@ -227,21 +227,15 @@ class CallProvider extends ChangeNotifier {
       speechTranscript = _speechAI!.fullTranscript;
     }
 
-    // Try Google Cloud STT on WAV for full both-sides transcript
+    // Try Vosk offline transcription on WAV for full both-sides transcript
     String transcript = '';
     if (wavPath != null && wavPath.isNotEmpty) {
-      await _transcriptionService.load();
-      if (_transcriptionService.isConfigured) {
-        try {
-          debugPrint('[CallProvider] Transcribing WAV via Google Cloud STT...');
-          transcript = await _transcriptionService.transcribe(wavPath);
-          debugPrint('[CallProvider] Google STT transcript (${transcript.length} chars)');
-        } catch (e) {
-          debugPrint('[CallProvider] Google STT failed: $e — falling back to SpeechRecognizer');
-          transcript = speechTranscript;
-        }
-      } else {
-        debugPrint('[CallProvider] Google STT not configured — using SpeechRecognizer only');
+      try {
+        debugPrint('[CallProvider] Transcribing WAV via Vosk offline STT...');
+        transcript = await _transcriptionService.transcribe(wavPath);
+        debugPrint('[CallProvider] Vosk transcript (${transcript.length} chars)');
+      } catch (e) {
+        debugPrint('[CallProvider] Vosk failed: $e — falling back to SpeechRecognizer');
         transcript = speechTranscript;
       }
     } else {

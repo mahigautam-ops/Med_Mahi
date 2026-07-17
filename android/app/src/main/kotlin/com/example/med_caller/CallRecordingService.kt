@@ -15,7 +15,7 @@ class CallRecordingService {
 
     companion object {
         private const val TAG = "CallRecording"
-        private const val SAMPLE_RATE = 44100
+        private const val SAMPLE_RATE = 16000
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     }
