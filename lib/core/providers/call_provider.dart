@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../services/speech_service.dart';
+import '../services/transcription_service.dart';
 import '../services/ai_service.dart';
 import '../services/firebase_service.dart';
 import '../providers/ai_settings.dart';
@@ -21,6 +22,7 @@ class CallProvider extends ChangeNotifier {
 
   StreamSubscription? _sub;
   final FirebaseService _firebaseService = FirebaseService();
+  final TranscriptionService _transcriptionService = TranscriptionService();
   AiSettingsProvider? _aiSettings;
   SpeechAIService? _speechAI;
 
@@ -216,14 +218,34 @@ class CallProvider extends ChangeNotifier {
   }
 
   void _onCallEnded() async {
-    await stopRecordingIfActive();
+    final wavPath = await stopRecordingIfActive();
 
-    // Stop speech recognition and get transcript
-    String transcript = '';
+    // Stop speech recognition for fallback transcript
+    String speechTranscript = '';
     if (_speechAI != null && _speechAI!.isListening) {
-      final result = await _speechAI!.stopListeningAndGenerate();
-      transcript = _speechAI!.fullTranscript;
-      debugPrint('[CallProvider] Speech transcript: ${transcript.substring(0, transcript.length > 100 ? 100 : transcript.length)}...');
+      await _speechAI!.stopListeningAndGenerate();
+      speechTranscript = _speechAI!.fullTranscript;
+    }
+
+    // Try Google Cloud STT on WAV for full both-sides transcript
+    String transcript = '';
+    if (wavPath != null && wavPath.isNotEmpty) {
+      await _transcriptionService.load();
+      if (_transcriptionService.isConfigured) {
+        try {
+          debugPrint('[CallProvider] Transcribing WAV via Google Cloud STT...');
+          transcript = await _transcriptionService.transcribe(wavPath);
+          debugPrint('[CallProvider] Google STT transcript (${transcript.length} chars)');
+        } catch (e) {
+          debugPrint('[CallProvider] Google STT failed: $e — falling back to SpeechRecognizer');
+          transcript = speechTranscript;
+        }
+      } else {
+        debugPrint('[CallProvider] Google STT not configured — using SpeechRecognizer only');
+        transcript = speechTranscript;
+      }
+    } else {
+      transcript = speechTranscript;
     }
 
     if (transcript.isEmpty) {
@@ -231,10 +253,6 @@ class CallProvider extends ChangeNotifier {
       _callDuration = Duration.zero;
       notifyListeners();
       return;
-    }
-
-    if (_aiSettings == null || !_aiSettings!.isConfigured) {
-      debugPrint('[CallProvider] AI not configured — skipping summary (transcript saved to timeline)');
     }
 
     _isProcessingRecording = true;

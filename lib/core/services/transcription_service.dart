@@ -6,30 +6,28 @@ import '../providers/ai_settings.dart';
 import 'ai_service.dart';
 
 class TranscriptionService {
-  String _whisperApiKey = '';
-  String _whisperEndpoint = 'https://api.openai.com/v1/audio/transcriptions';
-  String _whisperModel = 'whisper-1';
+  String _apiKey = '';
+  static const _kGoogleSttKey = 'google_stt_api_key';
+  static const _endpoint = 'https://speech.googleapis.com/v1/speech:recognize';
 
-  static const _kWhisperKey = 'whisper_api_key';
-
-  bool get isConfigured => _whisperApiKey.isNotEmpty;
+  bool get isConfigured => _apiKey.isNotEmpty;
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
-    _whisperApiKey = prefs.getString(_kWhisperKey) ?? '';
+    _apiKey = prefs.getString(_kGoogleSttKey) ?? '';
   }
 
   Future<void> updateApiKey(String key) async {
-    _whisperApiKey = key.trim();
+    _apiKey = key.trim();
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_kWhisperKey, _whisperApiKey);
+    await prefs.setString(_kGoogleSttKey, _apiKey);
   }
 
   Future<String> transcribe(String wavFilePath) async {
     if (!isConfigured) {
       throw AIException(
-        'Whisper API not configured',
-        'Set OpenAI API key in Admin Panel → AI Settings → Transcription.',
+        'Google STT not configured',
+        'Set Google Cloud API key in Admin Panel → AI Settings → Transcription.',
       );
     }
 
@@ -43,38 +41,69 @@ class TranscriptionService {
       throw AIException('Empty file', 'Recording file is empty.');
     }
 
-    final request = http.MultipartRequest('POST', Uri.parse(_whisperEndpoint));
-    request.headers['Authorization'] = 'Bearer $_whisperApiKey';
-    request.fields['model'] = _whisperModel;
-    request.fields['language'] = 'en';
-    request.fields['response_format'] = 'text';
-    request.files.add(http.MultipartFile.fromBytes(
-      'file',
-      bytes,
-      filename: 'call_recording.wav',
-    ));
+    final audioBase64 = base64Encode(bytes);
+
+    final requestBody = jsonEncode({
+      'config': {
+        'encoding': 'LINEAR16',
+        'sampleRateHertz': 44100,
+        'languageCode': 'en-IN',
+        'alternativeLanguageCodes': ['en-US'],
+        'model': 'phone_call',
+        'enableAutomaticPunctuation': true,
+        'enableWordTimeOffsets': false,
+        'audioChannelCount': 1,
+        'useEnhanced': true,
+      },
+      'audio': {
+        'content': audioBase64,
+      },
+    });
 
     try {
-      final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 120),
-      );
-      final response = await http.Response.fromStream(streamedResponse);
+      final response = await http
+          .post(
+            Uri.parse('$_endpoint?key=$_apiKey'),
+            headers: {'Content-Type': 'application/json'},
+            body: requestBody,
+          )
+          .timeout(const Duration(seconds: 120));
 
       if (response.statusCode == 200) {
-        return response.body.trim();
+        final data = jsonDecode(response.body);
+        final results = data['results'] as List? ?? [];
+
+        final transcriptParts = <String>[];
+        for (final result in results) {
+          final alternatives = result['alternatives'] as List? ?? [];
+          if (alternatives.isNotEmpty) {
+            final transcript = alternatives[0]['transcript']?.toString() ?? '';
+            if (transcript.isNotEmpty) {
+              transcriptParts.add(transcript);
+            }
+          }
+        }
+
+        return transcriptParts.join(' ').trim();
       }
 
-      if (response.statusCode == 401) {
+      if (response.statusCode == 403) {
         throw AIException(
-          'Invalid API Key',
-          'The Whisper API key is invalid. Update it in Admin Panel.',
+          'API key invalid or STT not enabled',
+          'Enable Speech-to-Text API in Google Cloud Console.',
         );
       }
 
-      throw AIException('Transcription Error ${response.statusCode}', response.body);
+      throw AIException(
+        'Transcription Error ${response.statusCode}',
+        response.body,
+      );
     } catch (e) {
       if (e is AIException) rethrow;
-      throw AIException('Transcription failed', 'Check internet connection and try again.');
+      throw AIException(
+        'Transcription failed',
+        'Check internet connection and try again.',
+      );
     }
   }
 
