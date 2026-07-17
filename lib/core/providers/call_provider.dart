@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../services/transcription_service.dart';
 import '../services/ai_service.dart';
 import '../services/firebase_service.dart';
@@ -173,6 +174,11 @@ class CallProvider extends ChangeNotifier {
       _isRecording = false;
       debugPrint('[CallProvider] Recording stopped: $_recordingPath');
     } else {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        debugPrint('[CallProvider] Microphone permission denied');
+        return;
+      }
       final path = await _recordingChannel.invokeMethod<String>('startRecording');
       if (path != null) {
         _isRecording = true;

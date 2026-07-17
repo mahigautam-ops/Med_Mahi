@@ -111,8 +111,10 @@ class CallRecordingService {
                 }
             }
 
-            writeWavHeader(outFile, totalBytes)
+            fos.flush()
         }
+
+        writeWavHeader(outFile, totalBytes)
     }
 
     private fun writeWavHeader(file: File, totalDataBytes: Int) {
